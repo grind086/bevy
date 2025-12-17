@@ -57,6 +57,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 #ifdef VERTEX_COLORS
     out.color = vertex.color;
 #endif
+
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    out.instance_index = vertex.instance_index;
+#endif
     return out;
 }
 
