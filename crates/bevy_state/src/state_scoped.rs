@@ -9,7 +9,9 @@ use bevy_ecs::{
     hierarchy::Children,
     message::MessageReader,
     query::{Allow, With},
+    resource::IsResource,
     system::{Commands, Query},
+    world::World,
 };
 #[cfg(feature = "bevy_reflect")]
 use bevy_reflect::prelude::*;
@@ -86,7 +88,7 @@ impl<S: States> DespawnWhen<S> {
 pub fn despawn_entities_when_state<S: States>(
     mut commands: Commands,
     mut transitions: MessageReader<StateTransitionEvent<S>>,
-    query: Query<(Entity, &DespawnWhen<S>), Allow<Disabled>>,
+    query: Query<(Entity, Option<&IsResource>, &DespawnWhen<S>), Allow<Disabled>>,
 ) {
     // We use the latest event, because state machine internals generate at most 1
     // transition event (per type) each frame. No event means no change happened
@@ -97,9 +99,15 @@ pub fn despawn_entities_when_state<S: States>(
     if transition.entered == transition.exited && !transition.allow_same_state_transitions {
         return;
     }
-    for (entity, when) in &query {
+    for (entity, is_resource, when) in &query {
         if (when.state_transition_evaluator)(transition) {
-            commands.entity(entity).try_despawn();
+            if let Some(component_id) = is_resource.map(IsResource::resource_component_id) {
+                commands.queue(move |world: &mut World| {
+                    world.remove_resource_by_id(component_id);
+                });
+            } else {
+                commands.entity(entity).try_despawn();
+            }
         }
     }
 }
@@ -164,7 +172,7 @@ where
 pub fn despawn_entities_on_exit_state<S: States>(
     mut commands: Commands,
     mut transitions: MessageReader<StateTransitionEvent<S>>,
-    query: Query<(Entity, &DespawnOnExit<S>), Allow<Disabled>>,
+    query: Query<(Entity, Option<&IsResource>, &DespawnOnExit<S>), Allow<Disabled>>,
 ) {
     // We use the latest event, because state machine internals generate at most 1
     // transition event (per type) each frame. No event means no change happened
@@ -178,9 +186,15 @@ pub fn despawn_entities_on_exit_state<S: States>(
     let Some(exited) = &transition.exited else {
         return;
     };
-    for (entity, exit) in &query {
+    for (entity, is_resource, exit) in &query {
         if exit.0 == *exited {
-            commands.entity(entity).try_despawn();
+            if let Some(component_id) = is_resource.map(IsResource::resource_component_id) {
+                commands.queue(move |world: &mut World| {
+                    world.remove_resource_by_id(component_id);
+                });
+            } else {
+                commands.entity(entity).try_despawn();
+            }
         }
     }
 }
@@ -242,7 +256,7 @@ impl<S: States + Default> Default for DespawnOnEnter<S> {
 pub fn despawn_entities_on_enter_state<S: States>(
     mut commands: Commands,
     mut transitions: MessageReader<StateTransitionEvent<S>>,
-    query: Query<(Entity, &DespawnOnEnter<S>), Allow<Disabled>>,
+    query: Query<(Entity, Option<&IsResource>, &DespawnOnEnter<S>), Allow<Disabled>>,
 ) {
     // We use the latest event, because state machine internals generate at most 1
     // transition event (per type) each frame. No event means no change happened
@@ -256,9 +270,15 @@ pub fn despawn_entities_on_enter_state<S: States>(
     let Some(entered) = &transition.entered else {
         return;
     };
-    for (entity, enter) in &query {
+    for (entity, is_resource, enter) in &query {
         if enter.0 == *entered {
-            commands.entity(entity).try_despawn();
+            if let Some(component_id) = is_resource.map(IsResource::resource_component_id) {
+                commands.queue(move |world: &mut World| {
+                    world.remove_resource_by_id(component_id);
+                });
+            } else {
+                commands.entity(entity).try_despawn();
+            }
         }
     }
 }
@@ -762,6 +782,7 @@ mod tests {
     use super::*;
 
     use bevy_app::App;
+    use bevy_ecs::resource::Resource;
 
     use crate::{
         app::{AppExtStates, StatesPlugin},
@@ -881,5 +902,46 @@ mod tests {
         // this is because "set_state_if_different" skips state transitions since
         // the app's next state is the same as its previous.
         assert!(app.world().get_entity(entity).is_ok());
+    }
+
+    #[test]
+    fn despawn_resource() {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, States)]
+        enum State {
+            On,
+            Off,
+        }
+
+        #[derive(Resource)]
+        #[require(DespawnWhen::<State>::new(|ev| ev.entered == Some(State::Off)))]
+        struct WhenResource;
+
+        #[derive(Resource)]
+        #[require(DespawnOnExit::<_>(State::On))]
+        struct OnExitResource;
+
+        #[derive(Resource)]
+        #[require(DespawnOnEnter::<_>(State::Off))]
+        struct OnEnterResource;
+
+        let mut app = App::new();
+        app.add_plugins(StatesPlugin);
+
+        app.insert_state(State::On);
+        app.insert_resource(WhenResource);
+        app.insert_resource(OnExitResource);
+        app.insert_resource(OnEnterResource);
+        app.update();
+
+        assert!(app.world().contains_resource::<WhenResource>());
+        assert!(app.world().contains_resource::<OnExitResource>());
+        assert!(app.world().contains_resource::<OnEnterResource>());
+
+        app.world_mut().commands().set_state(State::Off);
+        app.update();
+
+        assert!(!app.world().contains_resource::<WhenResource>());
+        assert!(!app.world().contains_resource::<OnExitResource>());
+        assert!(!app.world().contains_resource::<OnEnterResource>());
     }
 }
